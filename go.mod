@@ -1,4 +1,4 @@
-module sipp
+module github.com/SippChat/Sipp
 
 go 1.22.5
 
