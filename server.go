@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+
+	// KALANI. IMPORT IT HERE PLS
 	"github.com/SippChat/Sipp/pkg/straw"
 )
 
@@ -26,7 +28,7 @@ const (
 	invalidMsg    = "Invalid handshake"
 	lockFileName  = "server.lock"
 	logDir        = "logs"
-	motdFileName  = "motd"
+	motdFileName  = "motd" // File name for MOTD
 )
 
 type HandshakeRequest struct {
@@ -40,23 +42,17 @@ type HandshakeResponse struct {
 }
 
 var log = logrus.New()
-var welcomeMsg string
+var motd string
 
 func main() {
 	port := flag.Int("p", defaultPort, "Port to bind to")
 	flag.Parse()
 
-	// Check if the MOTD file exists
-	if _, err := os.Stat(motdFileName); err == nil {
-		// Read and serialize MOTD from the file
-		var err error
-		welcomeMsg, err = readAndSerializeMOTD(motdFileName)
-		if err != nil {
-			log.Fatalf("Error reading or serializing MOTD: %v", err)
-		}
-	} else {
-		// Set an empty welcome message if the file does not exist
-		welcomeMsg = ""
+	// Read and serialize MOTD from the file
+	var err error
+	motd, err = readAndSerializeMOTD(motdFileName)
+	if err != nil {
+		log.Fatalf("Error reading or serializing MOTD: %v", err)
 	}
 
 	// Set up a channel to listen for interrupt signals
@@ -157,6 +153,8 @@ func handleConnection(conn net.Conn) {
 		log.Errorf("Handshake failed: %v", err)
 		return
 	}
+
+	sendMessage(conn, map[string]string{"server": motd})
 }
 
 func processHandshake(conn net.Conn) error {
@@ -183,6 +181,13 @@ func processHandshake(conn net.Conn) error {
 func sendHandshakeResponse(writer *bufio.Writer, success bool, message string) error {
 	response := HandshakeResponse{Success: success, Message: message}
 	return writeJSONMessage(writer, response)
+}
+
+func sendMessage(conn net.Conn, message map[string]string) {
+	writer := bufio.NewWriter(conn)
+	if err := writeJSONMessage(writer, message); err != nil {
+		log.Errorf("Error sending message: %v", err)
+	}
 }
 
 func writeJSONMessage(writer *bufio.Writer, message interface{}) error {
@@ -218,4 +223,3 @@ func readAndSerializeMOTD(filename string) (string, error) {
 
 	return straw.Serialize(builder.String()), nil
 }
-
