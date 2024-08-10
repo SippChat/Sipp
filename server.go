@@ -7,12 +7,14 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -24,7 +26,6 @@ const (
 	defaultPort   = 5199
 	expectedMagic = "SippClientHello"
 	invalidMsg    = "Invalid handshake"
-	lockFile      = "server.lock"
 	logDir        = "logs"
 	motdFile      = "motd"
 )
@@ -39,10 +40,20 @@ type HandshakeRes struct {
 	Message string `json:"message"`
 }
 
-var log = logrus.New()
-var console = logrus.New()
-var motd string
-var lockFilePath string // Store the lock file path for cleanup
+var (
+	log          = logrus.New()
+	console      = logrus.New()
+	motd         string
+	clients      = make(map[net.Conn]string) // Map of connections to client IDs
+	clientsMutex = &sync.Mutex{}             // Mutex to protect client map
+	messageQueue = make(chan Message, 100)   // Channel for incoming messages
+)
+
+type Message struct {
+	Sender   string `json:"sender"`   // Client ID of the sender
+	Receiver string `json:"receiver"` // Client ID of the receiver (can be empty for broadcast)
+	Content  string `json:"content"`  // Message content
+}
 
 func main() {
 	port := flag.Int("p", defaultPort, "Port to bind to")
@@ -50,16 +61,14 @@ func main() {
 
 	initMOTD()
 	handleSignals()
-
-	lockFilePath = lockFile
-	defer createLockFile()
-	defer removeLockFile()
-
+	
 	logFile := initLogging()
 	defer logFile.Close()
 
-	console.Info("Sipp server starting up...")
-	log.Info("Sipp server starting up...")
+	logAndConsole("Sipp server starting up...")
+
+	// Start message handler
+	go handleMessages()
 
 	startServer(*port)
 }
@@ -85,33 +94,13 @@ func handleSignals() {
 
 	go func() {
 		sig := <-sigChan
-		console.Infof("Received signal: %v. Shutting down...", sig)
-		log.Infof("Received signal: %v. Shutting down...", sig)
-		removeLockFile() // Ensure lock file is removed on shutdown
+		logAndConsole(fmt.Sprintf("Received signal: %v. Shutting down...", sig))
+		// NEED TO ADD LOCK BACK LOL
 		os.Exit(0)
 	}()
 }
 
-// createLockFile creates a lock file to prevent multiple instances.
-func createLockFile() *os.File {
-	lock, err := os.OpenFile(lockFile, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
-	if err != nil {
-		if os.IsExist(err) {
-			log.Fatalf("Lock file already exists: %v", err)
-		}
-		log.Fatalf("Error creating lock file: %v", err)
-	}
-	return lock
-}
 
-// removeLockFile removes the lock file if it exists.
-func removeLockFile() {
-	if lockFilePath != "" {
-		if err := os.Remove(lockFilePath); err != nil {
-			log.Errorf("Error removing lock file: %v", err)
-		}
-	}
-}
 
 // initLogging sets up the logging system.
 func initLogging() *os.File {
@@ -152,25 +141,22 @@ func getLogPath() string {
 func startServer(port int) {
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
-		console.Fatalf("Error listening: %v", err)
+		logAndConsole(fmt.Sprintf("Error listening: %v", err))
 		return
 	}
 	defer listener.Close()
 
-	console.Infof("Sipp server listening on port %d", port)
-	log.Infof("Sipp server listening on port %d", port)
+	logAndConsole(fmt.Sprintf("Sipp server listening on port %d", port))
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			console.Errorf("Error accepting connection: %v", err)
-			log.Errorf("Error accepting connection: %v", err)
+			logAndConsole(fmt.Sprintf("Error accepting connection: %v", err))
 			continue
 		}
 
 		clientAddr := conn.RemoteAddr().String()
-		console.Infof("Client Connected: %s", clientAddr)
-		log.Infof("Client Connected: %s", clientAddr)
+		logAndConsole(fmt.Sprintf("Client Connected: %s", clientAddr))
 
 		go handleConn(conn)
 	}
@@ -180,8 +166,32 @@ func startServer(port int) {
 func handleConn(conn net.Conn) {
 	defer conn.Close()
 
+	// Perform handshake
 	if err := processHandshake(conn); err != nil {
 		log.Errorf("Handshake failed: %v", err)
+		return
+	}
+
+	// Register client
+	clientID := conn.RemoteAddr().String()
+	addClient(conn, clientID)
+	defer removeClient(conn)
+
+	// Handle incoming client messages
+	for {
+		message, err := readMessage(conn)
+		if err != nil {
+			if err != io.EOF {
+				log.Errorf("Error reading message: %v", err)
+			}
+			return
+		}
+
+		// Send message to the queue
+		messageQueue <- Message{
+			Sender:  clientID,
+			Content: message,
+		}
 	}
 }
 
@@ -262,4 +272,88 @@ func serialize(message string) string {
 		return "" // Avoid serializing empty strings
 	}
 	return straw.Serialize(message)
+}
+
+// addClient adds a new client to the client map.
+func addClient(conn net.Conn, clientID string) {
+	clientsMutex.Lock()
+	defer clientsMutex.Unlock()
+	clients[conn] = clientID
+	logAndConsole(fmt.Sprintf("Client %s connected", clientID))
+}
+
+// removeClient removes a client from the client map.
+func removeClient(conn net.Conn) {
+	clientsMutex.Lock()
+	defer clientsMutex.Unlock()
+	if clientID, ok := clients[conn]; ok {
+		delete(clients, conn)
+		logAndConsole(fmt.Sprintf("Client %s disconnected", clientID))
+	}
+}
+
+// broadcastMessage sends a message to all clients except the sender.
+func broadcastMessage(senderID, content string) {
+	clientsMutex.Lock()
+	defer clientsMutex.Unlock()
+	for conn, clientID := range clients {
+		if clientID != senderID {
+			if err := sendMessage(conn, Message{
+				Sender:  senderID,
+				Content: content,
+			}); err != nil {
+				log.Errorf("Error sending broadcast message to %s: %v", clientID, err)
+			}
+		}
+	}
+}
+
+// sendMessage sends a message to a specific client.
+func sendMessage(conn net.Conn, message Message) error {
+	return writeMessage(bufio.NewWriter(conn), message)
+}
+
+// handleMessages processes messages from the queue and routes them.
+func handleMessages() {
+	for msg := range messageQueue {
+		if msg.Receiver == "" { // Broadcast message
+			broadcastMessage(msg.Sender, msg.Content)
+		} else { // Send to specific client
+			clientsMutex.Lock()
+			defer clientsMutex.Unlock()
+			for conn, id := range clients {
+				if id == msg.Receiver {
+					if err := sendMessage(conn, Message{
+						Sender:  msg.Sender,
+						Content: msg.Content,
+					}); err != nil {
+						log.Errorf("Error sending message to %s: %v", id, err)
+					}
+					break
+				}
+			}
+		}
+	}
+}
+
+// readMessage reads a message from the client.
+func readMessage(conn net.Conn) (string, error) {
+	reader := bufio.NewReader(conn)
+	raw, err := reader.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+
+	var msg Message
+	if err := json.Unmarshal([]byte(raw), &msg); err != nil {
+		return "", fmt.Errorf("parsing message: %w", err)
+	}
+
+	return msg.Content, nil
+}
+
+// logAndConsole logs and prints messages to both log and console.
+func logAndConsole(message string) {
+	log.Info(message)
+	console.Info(message)
 }
