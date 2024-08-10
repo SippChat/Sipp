@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"os/signal"
@@ -15,18 +14,19 @@ import (
 	"strconv"
 	"syscall"
 	"time"
+
+	"github.com/sirupsen/logrus"
+
+	// KALANI. IMPORT IT HERE PLS
 )
 
 const (
 	defaultPort   = 5199
 	expectedMagic = "SippClientHello"
-	welcomeMsg    = "Welcome!"
 	invalidMsg    = "Invalid handshake"
 	lockFileName  = "server.lock"
 	logDir        = "logs"
-	motd          = `If you're seeing this message, welp you're connected!
-Welcome to Sipp -- This is an automated action.
-beep boop beep`
+	motdFileName  = "motd" // File name for MOTD
 )
 
 type HandshakeRequest struct {
@@ -39,9 +39,19 @@ type HandshakeResponse struct {
 	Message string `json:"message"`
 }
 
+var log = logrus.New()
+var motd string
+
 func main() {
 	port := flag.Int("p", defaultPort, "Port to bind to")
 	flag.Parse()
+
+	// Read and serialize MOTD from the file
+	var err error
+	motd, err = readAndSerializeMOTD(motdFileName)
+	if err != nil {
+		log.Fatalf("Error reading or serializing MOTD: %v", err)
+	}
 
 	// Set up a channel to listen for interrupt signals
 	sigChan := make(chan os.Signal, 1)
@@ -80,31 +90,48 @@ func main() {
 	}
 	defer logFile.Close()
 
-	// Setup logging to both console and file
+	// Set up logging to both console and file
 	log.SetOutput(logFile)
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	logAndPrint("Sipp server starting up...")
+	log.SetFormatter(&logrus.TextFormatter{
+		FullTimestamp: true,
+		ForceColors:   true,
+	})
+
+	// Console logger configuration
+	consoleLogger := logrus.New()
+	consoleLogger.SetFormatter(&logrus.TextFormatter{
+		FullTimestamp: true,
+		ForceColors:   true,
+	})
+
+	// Log server start
+	consoleLogger.Info("Sipp server starting up...")
+	log.Info("Sipp server starting up...")
 
 	// Start the server in a goroutine
 	go func() {
 		listener, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
 		if err != nil {
-			log.Fatalf("Error listening: %v", err)
+			consoleLogger.Fatalf("Error listening: %v", err)
+			return
 		}
 		defer listener.Close()
 
-		logAndPrint("Sipp server listening on port %d", *port)
+		consoleLogger.Infof("Sipp server listening on port %d", *port)
+		log.Infof("Sipp server listening on port %d", *port)
 
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
-				log.Printf("Error accepting connection: %v", err)
+				consoleLogger.Errorf("Error accepting connection: %v", err)
+				log.Errorf("Error accepting connection: %v", err)
 				continue
 			}
 
 			// Log client connection
 			clientAddr := conn.RemoteAddr().String()
-			logAndPrint("Client Connected: %s", clientAddr)
+			consoleLogger.Infof("Client Connected: %s", clientAddr)
+			log.Infof("Client Connected: %s", clientAddr)
 
 			go handleConnection(conn)
 		}
@@ -112,7 +139,8 @@ func main() {
 
 	// Wait for an interrupt signal
 	sig := <-sigChan
-	logAndPrint("Received signal: %v. Shutting down...", sig)
+	consoleLogger.Infof("Received signal: %v. Shutting down...", sig)
+	log.Infof("Received signal: %v. Shutting down...", sig)
 }
 
 func handleConnection(conn net.Conn) {
@@ -120,7 +148,7 @@ func handleConnection(conn net.Conn) {
 
 	err := processHandshake(conn)
 	if err != nil {
-		log.Printf("Handshake failed: %v", err)
+		log.Errorf("Handshake failed: %v", err)
 		return
 	}
 
@@ -156,7 +184,7 @@ func sendHandshakeResponse(writer *bufio.Writer, success bool, message string) e
 func sendMessage(conn net.Conn, message map[string]string) {
 	writer := bufio.NewWriter(conn)
 	if err := writeJSONMessage(writer, message); err != nil {
-		log.Printf("Error sending message: %v", err)
+		log.Errorf("Error sending message: %v", err)
 	}
 }
 
@@ -173,7 +201,23 @@ func writeJSONMessage(writer *bufio.Writer, message interface{}) error {
 	return writer.Flush()
 }
 
-func logAndPrint(format string, args ...interface{}) {
-	log.Printf(format, args...)
-	fmt.Printf(format+"\n", args...)
+// readAndSerializeMOTD reads the MOTD from a file, serializes it, and returns the result.
+func readAndSerializeMOTD(filename string) (string, error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return "", fmt.Errorf("opening MOTD file: %w", err)
+	}
+	defer file.Close()
+
+	var builder strings.Builder
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		builder.WriteString(scanner.Text() + "\n")
+	}
+
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("reading MOTD file: %w", err)
+	}
+
+	return straw.Serialize(builder.String()), nil
 }
