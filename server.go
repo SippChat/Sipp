@@ -2,157 +2,185 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha1"
+	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
-	"html"
 	"log"
 	"net"
 	"os"
 	"os/signal"
-	"strings"
-	"sync"
+	"path/filepath"
+	"strconv"
 	"syscall"
+	"time"
 )
 
-type Client struct {
-	conn net.Conn
-	name string
-}
-
-var (
-	clients    = make(map[net.Conn]*Client)
-	mu         sync.Mutex
-	shutdownCh = make(chan struct{})
+const (
+	defaultPort   = 5199
+	expectedMagic = "SippClientHello"
+	welcomeMsg    = "Welcome!"
+	invalidMsg    = "Invalid handshake"
+	lockFileName  = "server.lock"
+	logDir        = "logs"
+	motd          = `
+If you're seeing this message, welp you're connected!
+Welcome to Sipp -- This is an automated action.
+beep boop beep`
 )
 
-func handleClient(client *Client) {
-	reader := bufio.NewReader(client.conn)
-	defer func() {
-		client.conn.Close()
-		mu.Lock()
-		delete(clients, client.conn)
-		mu.Unlock()
-		log.Printf("%s disconnected", client.name)
-		broadcast(client.name + " has left the chat.\n")
-	}()
-
-	for {
-		msg, err := reader.ReadString('\n')
-		if err != nil {
-			return
-		}
-
-		sanitizedMsg := html.EscapeString(strings.TrimSpace(msg))
-		if strings.HasPrefix(sanitizedMsg, "/") {
-			handleCommand(client, sanitizedMsg)
-		} else {
-			broadcast(client.name + ": " + sanitizedMsg + "\n")
-		}
-	}
+type HandshakeRequest struct {
+	Magic  string `json:"magic"`
+	Client string `json:"client"`
 }
 
-func handleCommand(client *Client, cmd string) {
-	switch cmd {
-	case "/list":
-		client.conn.Write([]byte("Online users:\n"))
-		mu.Lock()
-		for _, c := range clients {
-			client.conn.Write([]byte(c.name + "\n"))
-		}
-		mu.Unlock()
-	default:
-		client.conn.Write([]byte("Unknown command\n"))
-	}
-}
-
-func broadcast(msg string) {
-	mu.Lock()
-	defer mu.Unlock()
-	for _, client := range clients {
-		client.conn.Write([]byte(msg))
-	}
+type HandshakeResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
 }
 
 func main() {
-	portPtr := flag.String("port", "42069", "Port to listen on")
-	lockfilePtr := flag.String("lockfile", "/var/run/sipp.lock", "Lockfile path")
+	port := flag.Int("p", defaultPort, "Port to bind to")
 	flag.Parse()
 
-	if err := createLockFile(*lockfilePtr); err != nil {
-		log.Fatalf("Error creating lockfile: %v", err)
-	}
-	defer os.Remove(*lockfilePtr)
+	// Set up a channel to listen for interrupt signals
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	logFile, err := os.OpenFile("server.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
+	// Create a lock file to indicate the server is running
+	lockFile, err := os.Create(lockFileName)
+	if err != nil {
+		log.Fatalf("Error creating lock file: %v", err)
+	}
+
+	// Ensure lock file is removed when the server shuts down
+	defer func() {
+		lockFile.Close()
+		os.Remove(lockFileName)
+	}()
+
+	// Create logs directory if it doesn't exist
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		log.Fatalf("Error creating logs directory: %v", err)
+	}
+
+	// Generate a shortened hash from the UNIX time for log file naming
+	unixTime := time.Now().Unix()
+	hash := sha1.New()
+	hash.Write([]byte(strconv.FormatInt(unixTime, 10)))
+	shortHash := hex.EncodeToString(hash.Sum(nil))[:8]
+
+	// Log file path
+	logFilePath := filepath.Join(logDir, fmt.Sprintf("log_%s.txt", shortHash))
+
+	// Open the log file for appending
+	logFile, err := os.OpenFile(logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		log.Fatalf("Error opening log file: %v", err)
 	}
 	defer logFile.Close()
+
+	// Setup logging to both console and file
 	log.SetOutput(logFile)
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	log.Println("Sipp server starting up...")
 
-	listener, err := net.Listen("tcp", ":"+*portPtr)
-	if err != nil {
-		log.Fatalf("Error listening on port %s: %v", *portPtr, err)
-	}
-	defer listener.Close()
+	// Also log to console
+	fmt.Println("Sipp server starting up...")
 
-	go handleShutdown(listener)
-
-	fmt.Println("Server listening on port", *portPtr)
-	for {
-		conn, err := listener.Accept()
+	// Start the server in a goroutine
+	go func() {
+		listener, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
 		if err != nil {
-			select {
-			case <-shutdownCh:
-				return
-			default:
+			log.Fatalf("Error listening: %v", err)
+		}
+		defer listener.Close()
+
+		log.Printf("Sipp server listening on port %d", *port)
+		fmt.Printf("Sipp server listening on port %d\n", *port)
+
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
 				log.Printf("Error accepting connection: %v", err)
 				continue
 			}
+
+			// Log client connection
+			clientAddr := conn.RemoteAddr().String()
+			log.Printf("Client Connected: %s", clientAddr)
+			fmt.Printf("Client Connected: %s\n", clientAddr)
+
+			go handleConnection(conn)
 		}
+	}()
 
-		client := &Client{conn: conn}
-		mu.Lock()
-		clients[conn] = client
-		mu.Unlock()
-
-		reader := bufio.NewReader(conn)
-		fmt.Fprintf(conn, "Enter your name: ")
-		client.name, _ = reader.ReadString('\n')
-		client.name = strings.TrimSpace(client.name)
-		if client.name == "" {
-			client.name = "Guest"
-		}
-
-		log.Printf("%s joined the chat", client.name)
-		broadcast(client.name + " has joined the chat.\n")
-		go handleClient(client)
-	}
+	// Wait for an interrupt signal
+	sig := <-sigChan
+	log.Printf("Received signal: %v. Shutting down...", sig)
+	fmt.Printf("Received signal: %v. Shutting down...\n", sig)
 }
 
-func createLockFile(path string) error {
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
+func handleConnection(conn net.Conn) {
+	defer conn.Close()
+
+	err := processHandshake(conn)
 	if err != nil {
-		return fmt.Errorf("error creating lockfile: %v", err)
+		log.Printf("Handshake failed: %v", err)
+		return
 	}
-	file.Close()
-	return nil
+
+	sendMessage(conn, map[string]string{"server": motd})
 }
 
-func handleShutdown(listener net.Listener) {
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
+func processHandshake(conn net.Conn) error {
+	reader := bufio.NewReader(conn)
+	writer := bufio.NewWriter(conn)
 
-	close(shutdownCh)
-	listener.Close()
-	mu.Lock()
-	for _, client := range clients {
-		client.conn.Close()
+	handshakeRaw, err := reader.ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("reading handshake: %w", err)
 	}
-	mu.Unlock()
-	log.Println("Server shut down gracefully")
-	os.Exit(0)
+
+	var handshake HandshakeRequest
+	if err := json.Unmarshal([]byte(handshakeRaw), &handshake); err != nil {
+		return fmt.Errorf("parsing handshake: %w", err)
+	}
+
+	if handshake.Magic != expectedMagic || handshake.Client == "" {
+		return sendHandshakeResponse(writer, false, invalidMsg)
+	}
+
+	return sendHandshakeResponse(writer, true, welcomeMsg)
 }
 
+func sendHandshakeResponse(writer *bufio.Writer, success bool, message string) error {
+	response := HandshakeResponse{Success: success, Message: message}
+	responseJSON, err := json.Marshal(response)
+	if err != nil {
+		return fmt.Errorf("marshalling handshake response: %w", err)
+	}
+
+	if _, err := writer.WriteString(string(responseJSON) + "\n"); err != nil {
+		return fmt.Errorf("sending handshake response: %w", err)
+	}
+
+	return writer.Flush()
+}
+
+func sendMessage(conn net.Conn, message map[string]string) {
+	writer := bufio.NewWriter(conn)
+	messageJSON, err := json.Marshal(message)
+	if err != nil {
+		log.Printf("Error marshalling message: %v", err)
+		return
+	}
+
+	if _, err := writer.WriteString(string(messageJSON) + "\n"); err != nil {
+		log.Printf("Error sending message: %v", err)
+		return
+	}
+
+	writer.Flush()
+}
