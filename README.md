@@ -1,6 +1,8 @@
 # Sipp
 
+
 Sipp is a lightweight TCP-based server designed to facilitate peer-to-peer communication using a simple protocol, written in [Go](https://go.dev/)
+
 ---
 
 ### Build
@@ -47,6 +49,7 @@ Sipp features its own formatting serializer, aptly titled "**Straw**". This seri
 - Tags are case-insensitive. For example, `<RED>` and `<red>` will have the same effect.
 - Use the closing tag `</tag>` to reset formatting applied by a specific tag.
 - Tags may be paired with one another.
+---
 
 ### MOTD
 
