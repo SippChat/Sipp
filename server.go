@@ -24,8 +24,7 @@ const (
 	invalidMsg    = "Invalid handshake"
 	lockFileName  = "server.lock"
 	logDir        = "logs"
-	motd          = `
-If you're seeing this message, welp you're connected!
+	motd          = `If you're seeing this message, welp you're connected!
 Welcome to Sipp -- This is an automated action.
 beep boop beep`
 )
@@ -84,10 +83,7 @@ func main() {
 	// Setup logging to both console and file
 	log.SetOutput(logFile)
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
-	log.Println("Sipp server starting up...")
-
-	// Also log to console
-	fmt.Println("Sipp server starting up...")
+	logAndPrint("Sipp server starting up...")
 
 	// Start the server in a goroutine
 	go func() {
@@ -97,8 +93,7 @@ func main() {
 		}
 		defer listener.Close()
 
-		log.Printf("Sipp server listening on port %d", *port)
-		fmt.Printf("Sipp server listening on port %d\n", *port)
+		logAndPrint("Sipp server listening on port %d", *port)
 
 		for {
 			conn, err := listener.Accept()
@@ -109,8 +104,7 @@ func main() {
 
 			// Log client connection
 			clientAddr := conn.RemoteAddr().String()
-			log.Printf("Client Connected: %s", clientAddr)
-			fmt.Printf("Client Connected: %s\n", clientAddr)
+			logAndPrint("Client Connected: %s", clientAddr)
 
 			go handleConnection(conn)
 		}
@@ -118,8 +112,7 @@ func main() {
 
 	// Wait for an interrupt signal
 	sig := <-sigChan
-	log.Printf("Received signal: %v. Shutting down...", sig)
-	fmt.Printf("Received signal: %v. Shutting down...\n", sig)
+	logAndPrint("Received signal: %v. Shutting down...", sig)
 }
 
 func handleConnection(conn net.Conn) {
@@ -157,30 +150,30 @@ func processHandshake(conn net.Conn) error {
 
 func sendHandshakeResponse(writer *bufio.Writer, success bool, message string) error {
 	response := HandshakeResponse{Success: success, Message: message}
-	responseJSON, err := json.Marshal(response)
+	return writeJSONMessage(writer, response)
+}
+
+func sendMessage(conn net.Conn, message map[string]string) {
+	writer := bufio.NewWriter(conn)
+	if err := writeJSONMessage(writer, message); err != nil {
+		log.Printf("Error sending message: %v", err)
+	}
+}
+
+func writeJSONMessage(writer *bufio.Writer, message interface{}) error {
+	messageJSON, err := json.Marshal(message)
 	if err != nil {
-		return fmt.Errorf("marshalling handshake response: %w", err)
+		return fmt.Errorf("marshalling message: %w", err)
 	}
 
-	if _, err := writer.WriteString(string(responseJSON) + "\n"); err != nil {
-		return fmt.Errorf("sending handshake response: %w", err)
+	if _, err := writer.WriteString(string(messageJSON) + "\n"); err != nil {
+		return fmt.Errorf("sending message: %w", err)
 	}
 
 	return writer.Flush()
 }
 
-func sendMessage(conn net.Conn, message map[string]string) {
-	writer := bufio.NewWriter(conn)
-	messageJSON, err := json.Marshal(message)
-	if err != nil {
-		log.Printf("Error marshalling message: %v", err)
-		return
-	}
-
-	if _, err := writer.WriteString(string(messageJSON) + "\n"); err != nil {
-		log.Printf("Error sending message: %v", err)
-		return
-	}
-
-	writer.Flush()
+func logAndPrint(format string, args ...interface{}) {
+	log.Printf(format, args...)
+	fmt.Printf(format+"\n", args...)
 }
