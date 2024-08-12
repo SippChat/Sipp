@@ -43,11 +43,7 @@ func handleClient(client *Client) {
 		}
 
 		sanitizedMsg := html.EscapeString(strings.TrimSpace(msg))
-		if strings.HasPrefix(sanitizedMsg, "/") {
-			handleCommand(client, sanitizedMsg)
-		} else {
-			broadcast(client.name + ": " + sanitizedMsg + "\n")
-		}
+		broadcast(client.name + ": " + sanitizedMsg + "\n")
 	}
 }
 
@@ -74,8 +70,8 @@ func broadcast(msg string) {
 }
 
 func main() {
-	portPtr := flag.String("port", "42069", "Port to listen on")
-	lockfilePtr := flag.String("lockfile", "/var/run/sipp.lock", "Lockfile path")
+	portPtr := flag.String("port", "5199", "Port to listen on")
+	lockfilePtr := flag.String("lockfile", ".", "Lockfile path")
 	flag.Parse()
 
 	if err := createLockFile(*lockfilePtr); err != nil {
