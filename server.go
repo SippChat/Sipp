@@ -14,6 +14,17 @@ import (
 	"syscall"
 )
 
+type HandshakeReq struct {
+	Magic  string `json:"magic"`
+	Client string `json:"client"`
+	Name   string `json:"name"`
+}
+
+type HandshakeRes struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+}
+
 type Client struct {
 	conn net.Conn
 	name string
@@ -44,20 +55,6 @@ func handleClient(client *Client) {
 
 		sanitizedMsg := html.EscapeString(strings.TrimSpace(msg))
 		broadcast(client.name + ": " + sanitizedMsg + "\n")
-	}
-}
-
-func handleCommand(client *Client, cmd string) {
-	switch cmd {
-	case "/list":
-		client.conn.Write([]byte("Online users:\n"))
-		mu.Lock()
-		for _, c := range clients {
-			client.conn.Write([]byte(c.name + "\n"))
-		}
-		mu.Unlock()
-	default:
-		client.conn.Write([]byte("Unknown command\n"))
 	}
 }
 
@@ -117,9 +114,7 @@ func main() {
 		fmt.Fprintf(conn, "Enter your name: ")
 		client.name, _ = reader.ReadString('\n')
 		client.name = strings.TrimSpace(client.name)
-		if client.name == "" {
-			client.name = "Guest"
-		}
+		// Added guest functionality into client
 
 		log.Printf("%s joined the chat", client.name)
 		broadcast(client.name + " has joined the chat.\n")
