@@ -3,4 +3,4 @@ motd
 server
 go.sum
 sipp-server
-*Sipp
+*.exe
